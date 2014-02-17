@@ -64,6 +64,8 @@ typedef struct osprd_info {
 
 	/* HINT: You may want to add additional fields to help
 	         in detecting deadlock. */
+	uint num_read_locks;
+	uint write_locked;
 
 	// The following elements are used internally; you don't need
 	// to understand them.
@@ -186,12 +188,13 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 {
 	osprd_info_t *d = file2osprd(filp);	// device info
 	int r = 0;			// return value: initially 0
+	unsigned ticket;
 
 	// is file open for writing?
 	int filp_writable = (filp->f_mode & FMODE_WRITE) != 0;
 
 	// This line avoids compiler warnings; you may remove it.
-	(void) filp_writable, (void) d;
+//	(void) filp_writable, (void) d;
 
 	// Set 'r' to the ioctl's return value: 0 on success, negative on error
 
@@ -203,6 +206,62 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// to write-lock the ramdisk; otherwise attempt to read-lock
 		// the ramdisk.
 		//
+
+		// TODO: is d ever null?
+
+		osp_spin_lock(&d->mutex);
+		// TODO: what if the current process already has a write lock?
+
+
+		/* grab a ticket */
+		ticket = d->ticket_head;
+		d->ticket_head++;
+
+		if (filp_writable) {
+			eprintk("Attempting to write-lock ramdisk... taking ticket %d with ticket_tail %d.\n", ticket, d->ticket_tail);
+			// write-lock the ramdisk
+
+			// TODO: make sure current does not have a read lock.
+			// if it does, return -DEADLK.
+
+			// wait for everything else in queue to finish
+			while (ticket != d->ticket_tail) {
+				// If the lock request blocks and is awoken by a signal, then
+				// return -ERESTARTSYS.
+				int w = wait_event_interruptible(d->blockq, 1);
+				osp_spin_unlock(&d->mutex);
+				if(w == -ERESTARTSYS) {
+				//	osp_spin_unlock(&d->mutex);
+					return -ERESTARTSYS;
+				}
+			//	osp_spin_unlock(&d->mutex);
+			//	eprintk("S");
+				schedule();
+				osp_spin_lock(&d->mutex);
+			}
+			eprintk("Acquiring write lock.\n");
+			// acquire read lock!
+			filp->f_flags |= F_OSPRD_LOCKED;
+			d->write_locked = 1;
+		//	d->ticket_tail++;
+
+		}
+		else {
+			eprintk("Attempting to read-lock ramdisk...\n");
+			// read-lock the ramdisk
+
+			while (!d->write_locked || ticket != d->ticket_tail) {
+				wait_event_interruptible(d->blockq, 1);
+				osp_spin_unlock(&d->mutex);
+				schedule();
+				osp_spin_lock(&d->mutex);
+			}
+			filp->f_flags |= F_OSPRD_LOCKED;
+			d->num_read_locks++;
+		}
+		d->ticket_tail++;
+		osp_spin_unlock(&d->mutex);
+
                 // This lock request must block using 'd->blockq' until:
 		// 1) no other process holds a write lock;
 		// 2) either the request is for a read lock, or no other process
@@ -233,8 +292,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// be protected by a spinlock; which ones?)
 
 		// Your code here (instead of the next two lines).
-		eprintk("Attempting to acquire\n");
-		r = -ENOTTY;
+		eprintk("Done acquiring.\n");
+	//	r = -ENOTTY;
 
 	} else if (cmd == OSPRDIOCTRYACQUIRE) {
 
@@ -246,20 +305,35 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// Otherwise, if we can grant the lock request, return 0.
 
 		// Your code here (instead of the next two lines).
-		eprintk("Attempting to try acquire\n");
+		eprintk("OSPRDIOCTRYACQUIRE not implemented.\n");
 		r = -ENOTTY;
 
 	} else if (cmd == OSPRDIOCRELEASE) {
-
+		eprintk("Attempting to release a lock...\n");
 		// EXERCISE: Unlock the ramdisk.
 		//
 		// If the file hasn't locked the ramdisk, return -EINVAL.
+		if((filp->f_flags & F_OSPRD_LOCKED) == 0) {
+			return -EINVAL;
+		}
+		osp_spin_lock(&d->mutex);
 		// Otherwise, clear the lock from filp->f_flags, wake up
 		// the wait queue, perform any additional accounting steps
 		// you need, and return 0.
+		if(filp_writable) {
+			d->write_locked = 0;
+			wake_up_all(&d->blockq);
+		}
+		else {
+			d->num_read_locks--;
+			wake_up_all(&d->blockq);
+		}
 
-		// Your code here (instead of the next line).
-		r = -ENOTTY;
+	//	filp->f_flags ^= F_OSPRD_LOCKED;
+		filp->f_flags &= !F_OSPRD_LOCKED;
+		osp_spin_unlock(&d->mutex);
+
+		eprintk("Lock released.\n");
 
 	} else
 		r = -ENOTTY; /* unknown command */
@@ -276,6 +350,7 @@ static void osprd_setup(osprd_info_t *d)
 	osp_spin_lock_init(&d->mutex);
 	d->ticket_head = d->ticket_tail = 0;
 	/* Add code here if you add fields to osprd_info_t. */
+	d->num_read_locks = d->write_locked = 0;
 }
 
 

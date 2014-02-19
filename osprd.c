@@ -169,9 +169,11 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 		if(filp_locked) {
 			if(filp_writable) {
 				d->write_locked = 0;
+				eprintk("Write-lock released.\n");
 			}
 			else {
 				d->num_read_locks--;
+				eprintk("Read-lock released\n");
 			}
 
 			wake_up_all(&d->blockq);
@@ -228,13 +230,16 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		d->ticket_head++;
 
 		if (filp_writable) {
-			eprintk("Attempting to write-lock ramdisk... taking ticket %d with head %d and tail %d.\n", ticket, d->ticket_head, d->ticket_tail);
+			eprintk("Write-locking ramdisk... ticket %d with tail %d.\n", ticket, d->ticket_tail);
 			// write-lock the ramdisk
 
 			// TODO: make sure current does not have a read lock.
 			// if it does, return -DEADLK.
 			if(d->write_locked == 1) {
 				eprintk("Looks like the file is write-locked.\n");
+			}
+			if(d->num_read_locks != 0) {
+				eprintk("Looks like the file is read-locked.\n");
 			}
 
 			// wait for everything else in queue to finish
@@ -244,26 +249,23 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 				osp_spin_unlock(&d->mutex);
 				int w = wait_event_interruptible(d->blockq, 1);
 				if(w == -ERESTARTSYS) {
-				//	osp_spin_unlock(&d->mutex);
 					return -ERESTARTSYS;
 				}
-			//	osp_spin_unlock(&d->mutex);
-			//	eprintk("S");
 				schedule();
 				osp_spin_lock(&d->mutex);
 			}
-			eprintk("Acquiring write lock.\n");
-			// acquire read lock!
 			filp->f_flags |= F_OSPRD_LOCKED;
 			d->write_locked = 1;
-		//	d->ticket_tail++;
-
 		}
 		else {
-			eprintk("Attempting to read-lock ramdisk...\n");
+			eprintk("Read-locking ramdisk... ticket %d with tail %d.\n", ticket, d->ticket_tail);
 			// read-lock the ramdisk
+			if(d->write_locked == 1) {
+				eprintk("Looks like the file is write-locked.\n");
+			}
 
-			while (!d->write_locked || ticket != d->ticket_tail) {
+
+			while (d->write_locked == 1 || ticket != d->ticket_tail) {
 				osp_spin_unlock(&d->mutex);
 				wait_event_interruptible(d->blockq, 1);
 				schedule();
@@ -305,7 +307,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// be protected by a spinlock; which ones?)
 
 		// Your code here (instead of the next two lines).
-		eprintk("Done acquiring.\n");
+	//	eprintk("Done acquiring.\n");
 	//	r = -ENOTTY;
 
 	} else if (cmd == OSPRDIOCTRYACQUIRE) {
@@ -317,12 +319,34 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// OSPRDIOCTRYACQUIRE should return -EBUSY.
 		// Otherwise, if we can grant the lock request, return 0.
 
-		// Your code here (instead of the next two lines).
-		eprintk("OSPRDIOCTRYACQUIRE not implemented.\n");
-		r = -ENOTTY;
+		osp_spin_lock(&d->mutex);
+
+		/* grab a ticket */
+		unsigned ticket = d->ticket_head;
+		d->ticket_head++;
+
+		if (filp_writable) {
+			// write lock
+			if(d->num_read_locks != 0 || d->write_locked == 1 || ticket != d->ticket_tail) {
+				osp_spin_unlock(&d->mutex);
+				return -EBUSY;
+			}
+			filp->f_flags |= F_OSPRD_LOCKED;
+			d->write_locked = 1;
+		}
+		else {
+			// read lock
+			if(d->write_locked == 1 || ticket != d->ticket_tail) {
+				osp_spin_unlock(&d->mutex);
+				return -EBUSY;
+			}
+			filp->f_flags |= F_OSPRD_LOCKED;
+			d->num_read_locks++;
+		}
+		osp_spin_unlock(&d->mutex);
 
 	} else if (cmd == OSPRDIOCRELEASE) {
-		eprintk("Attempting to release a lock...\n");
+	//	eprintk("Attempting to release a lock...\n");
 		// EXERCISE: Unlock the ramdisk.
 		//
 		// If the file hasn't locked the ramdisk, return -EINVAL.
@@ -342,8 +366,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			wake_up_all(&d->blockq);
 		}
 
-	//	filp->f_flags ^= F_OSPRD_LOCKED;
-		filp->f_flags &= !F_OSPRD_LOCKED;
+		filp->f_flags ^= F_OSPRD_LOCKED;
 		osp_spin_unlock(&d->mutex);
 
 		eprintk("Lock released.\n");

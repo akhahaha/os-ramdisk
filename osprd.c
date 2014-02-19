@@ -26,7 +26,7 @@
 
 /* eprintk() prints messages to the console.
  * (If working on a real Linux machine, change KERN_NOTICE to KERN_ALERT or
- * KERN_EMERG so that you are sure to see the messages.  By default, the
+ * KERN_EMERG so that you are sure to see the messages.	 By default, the
  * kernel does not print all messages to the console.  Levels like KERN_ALERT
  * and KERN_EMERG will make sure that you will see messages.) */
 #define eprintk(format, ...) printk(KERN_NOTICE format, ## __VA_ARGS__)
@@ -47,32 +47,32 @@ module_param(nsectors, int, 0);
 
 /* The internal representation of our device. */
 typedef struct osprd_info {
-	uint8_t *data;                  // The data array. Its size is
-	                                // (nsectors * SECTOR_SIZE) bytes.
+	uint8_t *data;					// The data array. Its size is
+									// (nsectors * SECTOR_SIZE) bytes.
 
-	osp_spinlock_t mutex;           // Mutex for synchronizing access to
-					// this block device
+	osp_spinlock_t mutex;			// Mutex for synchronizing access to
+									// this block device
 
-	unsigned ticket_head;		// Currently running ticket for
-					// the device lock
+	unsigned ticket_head;			// Currently running ticket for
+									// the device lock
 
-	unsigned ticket_tail;		// Next available ticket for
-					// the device lock
+	unsigned ticket_tail;			// Next available ticket for
+									// the device lock
 
-	wait_queue_head_t blockq;       // Wait queue for tasks blocked on
-					// the device lock
+	wait_queue_head_t blockq;		// Wait queue for tasks blocked on
+									// the device lock
 
 	/* HINT: You may want to add additional fields to help
-	         in detecting deadlock. */
+			 in detecting deadlock. */
 	uint num_read_locks;
 	uint write_locked;
 
 	// The following elements are used internally; you don't need
 	// to understand them.
-	struct request_queue *queue;    // The device request queue.
-	spinlock_t qlock;		// Used internally for mutual
-	                                //   exclusion in the 'queue'.
-	struct gendisk *gd;             // The generic disk.
+	struct request_queue *queue;	// The device request queue.
+	spinlock_t qlock;				// Used internally for mutual
+									//	 exclusion in the 'queue'.
+	struct gendisk *gd;				// The generic disk.
 } osprd_info_t;
 
 #define NOSPRD 4
@@ -83,29 +83,29 @@ static osprd_info_t osprds[NOSPRD];
 
 /*
  * file2osprd(filp)
- *   Given an open file, check whether that file corresponds to an OSP ramdisk.
- *   If so, return a pointer to the ramdisk's osprd_info_t.
- *   If not, return NULL.
+ *	 Given an open file, check whether that file corresponds to an OSP ramdisk.
+ *	 If so, return a pointer to the ramdisk's osprd_info_t.
+ *	 If not, return NULL.
  */
 static osprd_info_t *file2osprd(struct file *filp);
 
 /*
  * for_each_open_file(task, callback, user_data)
- *   Given a task, call the function 'callback' once for each of 'task's open
- *   files.  'callback' is called as 'callback(filp, user_data)'; 'filp' is
- *   the open file, and 'user_data' is copied from for_each_open_file's third
- *   argument.
+ *	 Given a task, call the function 'callback' once for each of 'task's open
+ *	 files.	 'callback' is called as 'callback(filp, user_data)'; 'filp' is
+ *	 the open file, and 'user_data' is copied from for_each_open_file's third
+ *	 argument.
  */
 static void for_each_open_file(struct task_struct *task,
-			       void (*callback)(struct file *filp,
+				   void (*callback)(struct file *filp,
 						osprd_info_t *user_data),
-			       osprd_info_t *user_data);
+				   osprd_info_t *user_data);
 
 
 /*
  * osprd_process_request(d, req)
- *   Called when the user reads or writes a sector.
- *   Should perform the read or write, as appropriate.
+ *	 Called when the user reads or writes a sector.
+ *	 Should perform the read or write, as appropriate.
  */
 static void osprd_process_request(osprd_info_t *d, struct request *req)
 {
@@ -193,7 +193,7 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 
 /*
  * osprd_ioctl(inode, filp, cmd, arg)
- *   Called to perform an ioctl on the named file.
+ *	 Called to perform an ioctl on the named file.
  */
 int osprd_ioctl(struct inode *inode, struct file *filp,
 		unsigned int cmd, unsigned long arg)
@@ -206,7 +206,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 	int filp_writable = (filp->f_mode & FMODE_WRITE) != 0;
 
 	// This line avoids compiler warnings; you may remove it.
-//	(void) filp_writable, (void) d;
+	//(void) filp_writable, (void) d;
 
 	// Set 'r' to the ioctl's return value: 0 on success, negative on error
 
@@ -218,72 +218,13 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// to write-lock the ramdisk; otherwise attempt to read-lock
 		// the ramdisk.
 		//
-
-		// TODO: is d ever null?
-
-		osp_spin_lock(&d->mutex);
-		// TODO: what if the current process already has a write lock?
-
-
-		/* grab a ticket */
-		ticket = d->ticket_head;
-		d->ticket_head++;
-
-		if (filp_writable) {
-			eprintk("Write-locking ramdisk... ticket %d with tail %d.\n", ticket, d->ticket_tail);
-			// write-lock the ramdisk
-
-			// TODO: make sure current does not have a read lock.
-			// if it does, return -DEADLK.
-			if(d->write_locked == 1) {
-				eprintk("Looks like the file is write-locked.\n");
-			}
-			if(d->num_read_locks != 0) {
-				eprintk("Looks like the file is read-locked.\n");
-			}
-
-			// wait for everything else in queue to finish
-			while (d->num_read_locks != 0 || d->write_locked == 1 || ticket != d->ticket_tail) {
-				// If the lock request blocks and is awoken by a signal, then
-				// return -ERESTARTSYS.
-				osp_spin_unlock(&d->mutex);
-				int w = wait_event_interruptible(d->blockq, 1);
-				if(w == -ERESTARTSYS) {
-					return -ERESTARTSYS;
-				}
-				schedule();
-				osp_spin_lock(&d->mutex);
-			}
-			filp->f_flags |= F_OSPRD_LOCKED;
-			d->write_locked = 1;
-		}
-		else {
-			eprintk("Read-locking ramdisk... ticket %d with tail %d.\n", ticket, d->ticket_tail);
-			// read-lock the ramdisk
-			if(d->write_locked == 1) {
-				eprintk("Looks like the file is write-locked.\n");
-			}
-
-
-			while (d->write_locked == 1 || ticket != d->ticket_tail) {
-				osp_spin_unlock(&d->mutex);
-				wait_event_interruptible(d->blockq, 1);
-				schedule();
-				osp_spin_lock(&d->mutex);
-			}
-			filp->f_flags |= F_OSPRD_LOCKED;
-			d->num_read_locks++;
-		}
-		d->ticket_tail++;
-		osp_spin_unlock(&d->mutex);
-
-                // This lock request must block using 'd->blockq' until:
+		// This lock request must block using 'd->blockq' until:
 		// 1) no other process holds a write lock;
 		// 2) either the request is for a read lock, or no other process
-		//    holds a read lock; and
+		//	  holds a read lock; and
 		// 3) lock requests should be serviced in order, so no process
-		//    that blocked earlier is still blocked waiting for the
-		//    lock.
+		//	  that blocked earlier is still blocked waiting for the
+		//	  lock.
 		//
 		// If a process acquires a lock, mark this fact by setting
 		// 'filp->f_flags |= F_OSPRD_LOCKED'.  You also need to
@@ -298,7 +239,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// Otherwise, if we can grant the lock request, return 0.
 
 		// 'd->ticket_head' and 'd->ticket_tail' should help you
-		// service lock requests in order.  These implement a ticket
+		// service lock requests in order.	These implement a ticket
 		// order: 'ticket_tail' is the next ticket, and 'ticket_head'
 		// is the ticket currently being served.  You should set a local
 		// variable to 'd->ticket_head' and increment 'd->ticket_head'.
@@ -306,9 +247,61 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// (Some of these operations are in a critical section and must
 		// be protected by a spinlock; which ones?)
 
-		// Your code here (instead of the next two lines).
-	//	eprintk("Done acquiring.\n");
-	//	r = -ENOTTY;
+		// TODO: is d ever null?
+		osp_spin_lock(&d->mutex);
+		ticket = d->ticket_head;
+		d->ticket_head++;
+
+		if (filp_writable) {
+			eprintk("Write-locking %d with tail %d.\n", ticket, d->ticket_tail); // DIAGNOSTIC
+			// write-lock the ramdisk
+
+			// TODO: make sure current does not have a read lock.
+			// if it does, return -DEADLK.
+			if(d->write_locked == 1) {
+				eprintk("Looks like file is write-locked.\n"); // DIAGNOSTIC
+			}
+			if(d->num_read_locks != 0) {
+				eprintk("Looks like file is read-locked.\n"); // DIAGNOSTIC
+			}
+
+			// wait for everything else in queue to finish
+			while (d->num_read_locks != 0 || d->write_locked == 1 || ticket != d->ticket_tail) {
+				// If the lock request blocks and is awoken by a signal, then
+				// return -ERESTARTSYS.
+				osp_spin_unlock(&d->mutex);
+				int w = wait_event_interruptible(d->blockq, 1);
+				if(w == -ERESTARTSYS) {
+					return -ERESTARTSYS;
+				}
+				schedule();
+				osp_spin_lock(&d->mutex);
+			}
+
+			filp->f_flags |= F_OSPRD_LOCKED;
+			d->write_locked = 1;
+		}
+		else {
+			eprintk("Read-locking %d with tail %d.\n", ticket, d->ticket_tail); // DIAGNOSTIC
+			// read-lock the ramdisk
+			if(d->write_locked == 1) {
+				eprintk("Looks like the file is write-locked.\n"); // DIAGNOSTIC
+			}
+
+			while (d->write_locked == 1 || ticket != d->ticket_tail) {
+				osp_spin_unlock(&d->mutex);
+				wait_event_interruptible(d->blockq, 1);
+				schedule();
+				osp_spin_lock(&d->mutex);
+			}
+
+			filp->f_flags |= F_OSPRD_LOCKED;
+			d->num_read_locks++;
+		}
+
+		d->ticket_tail++;
+		osp_spin_unlock(&d->mutex);
+		eprintk("Locked %d with tail %d.\n", ticket, d->ticket_tail); // DIAGNOSTIC
 
 	} else if (cmd == OSPRDIOCTRYACQUIRE) {
 
@@ -346,7 +339,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		osp_spin_unlock(&d->mutex);
 
 	} else if (cmd == OSPRDIOCRELEASE) {
-	//	eprintk("Attempting to release a lock...\n");
 		// EXERCISE: Unlock the ramdisk.
 		//
 		// If the file hasn't locked the ramdisk, return -EINVAL.
@@ -369,7 +361,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		filp->f_flags ^= F_OSPRD_LOCKED;
 		osp_spin_unlock(&d->mutex);
 
-		eprintk("Lock released.\n");
+		eprintk("Lock released.\n"); // DIAGNOSTIC
 
 	} else
 		r = -ENOTTY; /* unknown command */
@@ -391,8 +383,8 @@ static void osprd_setup(osprd_info_t *d)
 
 
 /*****************************************************************************/
-/*         THERE IS NO NEED TO UNDERSTAND ANY CODE BELOW THIS LINE!          */
-/*                                                                           */
+/*	THERE IS NO NEED TO UNDERSTAND ANY CODE BELOW THIS LINE!			 */
+/*																			 */
 /*****************************************************************************/
 
 // Process a list of requests for a osprd_info_t.
@@ -410,7 +402,7 @@ static void osprd_process_request_queue(request_queue_t *q)
 
 // Some particularly horrible stuff to get around some Linux issues:
 // the Linux block device interface doesn't let a block device find out
-// which file has been closed.  We need this information.
+// which file has been closed.	We need this information.
 
 static struct file_operations osprd_blk_fops;
 static int (*blkdev_release)(struct inode *, struct file *);
@@ -453,9 +445,9 @@ static osprd_info_t *file2osprd(struct file *filp)
 	if (filp) {
 		struct inode *ino = filp->f_dentry->d_inode;
 		if (ino->i_bdev
-		    && ino->i_bdev->bd_disk
-		    && ino->i_bdev->bd_disk->major == OSPRD_MAJOR
-		    && ino->i_bdev->bd_disk->fops == &osprd_ops)
+			&& ino->i_bdev->bd_disk
+			&& ino->i_bdev->bd_disk->major == OSPRD_MAJOR
+			&& ino->i_bdev->bd_disk->fops == &osprd_ops)
 			return (osprd_info_t *) ino->i_bdev->bd_disk->private_data;
 	}
 	return NULL;

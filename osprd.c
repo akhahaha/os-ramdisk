@@ -158,16 +158,26 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 {
 	if (filp) {
 		osprd_info_t *d = file2osprd(filp);
-		int filp_writable = filp->f_mode & FMODE_WRITE;
+		int filp_writable = ((filp->f_mode & FMODE_WRITE) != 0);
 
 		// EXERCISE: If the user closes a ramdisk file that holds
 		// a lock, release the lock.  Also wake up blocked processes
 		// as appropriate.
 
-		// Your code here.
+		osp_spin_lock(&d->mutex);
+		int filp_locked = ((filp->f_flags & F_OSPRD_LOCKED) != 0);
+		if(filp_locked) {
+			if(filp_writable) {
+				d->write_locked = 0;
+			}
+			else {
+				d->num_read_locks--;
+			}
 
-		// This line avoids compiler warnings; you may remove it.
-		(void) filp_writable, (void) d;
+			wake_up_all(&d->blockq);
+		}
+
+		osp_spin_unlock(&d->mutex);
 
 	}
 
@@ -218,14 +228,17 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		d->ticket_head++;
 
 		if (filp_writable) {
-			eprintk("Attempting to write-lock ramdisk... taking ticket %d with ticket_tail %d.\n", ticket, d->ticket_tail);
+			eprintk("Attempting to write-lock ramdisk... taking ticket %d with head %d and tail %d.\n", ticket, d->ticket_head, d->ticket_tail);
 			// write-lock the ramdisk
 
 			// TODO: make sure current does not have a read lock.
 			// if it does, return -DEADLK.
+			if(d->write_locked == 1) {
+				eprintk("Looks like the file is write-locked.\n");
+			}
 
 			// wait for everything else in queue to finish
-			while (ticket != d->ticket_tail) {
+			while (d->num_read_locks != 0 || d->write_locked == 1 || ticket != d->ticket_tail) {
 				// If the lock request blocks and is awoken by a signal, then
 				// return -ERESTARTSYS.
 				osp_spin_unlock(&d->mutex);

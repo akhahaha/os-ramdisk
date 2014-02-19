@@ -228,8 +228,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			while (ticket != d->ticket_tail) {
 				// If the lock request blocks and is awoken by a signal, then
 				// return -ERESTARTSYS.
-				int w = wait_event_interruptible(d->blockq, 1);
 				osp_spin_unlock(&d->mutex);
+				int w = wait_event_interruptible(d->blockq, 1);
 				if(w == -ERESTARTSYS) {
 				//	osp_spin_unlock(&d->mutex);
 					return -ERESTARTSYS;
@@ -251,8 +251,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			// read-lock the ramdisk
 
 			while (!d->write_locked || ticket != d->ticket_tail) {
-				wait_event_interruptible(d->blockq, 1);
 				osp_spin_unlock(&d->mutex);
+				wait_event_interruptible(d->blockq, 1);
 				schedule();
 				osp_spin_lock(&d->mutex);
 			}

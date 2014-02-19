@@ -329,7 +329,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		}
 		else {
 			// read lock
-			if(d->write_locked == 1 || ticket != d->ticket_tail) {
+			if(d->write_locked == 1) {
 				osp_spin_unlock(&d->mutex);
 				return -EBUSY;
 			}

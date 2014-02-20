@@ -110,6 +110,9 @@ static void for_each_open_file(struct task_struct *task,
  */
 static void osprd_process_request(osprd_info_t *d, struct request *req)
 {
+	void *data_offset;
+	unsigned int data_length;
+
 	if (!blk_fs_request(req)) {
 		end_request(req, 0);
 		return;
@@ -123,8 +126,8 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 	// Consider the 'req->sector', 'req->current_nr_sectors', and
 	// 'req->buffer' members, and the rq_data_dir() function.
 
-	void *data_offset = d->data + (SECTOR_SIZE * req->sector);
-	unsigned int data_length = req->current_nr_sectors * SECTOR_SIZE;
+	data_offset = d->data + (SECTOR_SIZE * req->sector);
+	data_length = req->current_nr_sectors * SECTOR_SIZE;
 
 	// TODO: include a test for out-of-range read/writes
 	if (rq_data_dir(req) == WRITE)
@@ -159,23 +162,20 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 	if (filp) {
 		osprd_info_t *d = file2osprd(filp);
 		int filp_writable = ((filp->f_mode & FMODE_WRITE) != 0);
+		int i;
 
 		// EXERCISE: If the user closes a ramdisk file that holds
 		// a lock, release the lock.  Also wake up blocked processes
 		// as appropriate.
 
-		// This line avoids compiler warnings; you may remove it.
-		(void) filp_writable, (void) d;
-
 		osp_spin_lock(&d->mutex);
-		if (filp->f_flags & F_OSPRD_LOCKED)
+		if (filp->f_flags & F_OSPRD_LOCKED) {
 			if (filp_writable) {
 				d->write_locked = 0;
 				d->write_proc = -1;
 			}
 			else {
 				d->num_read_locks--;
-				int i;
 				for (i = 0; i < OSPRD_MAJOR; i++) {
 					if (d->read_procs[i] == current->pid) {
 						d->read_procs[i] = -1;
@@ -183,6 +183,7 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 					}
 				}
 			}
+		}
 
 		filp->f_flags ^= F_OSPRD_LOCKED;
 		osp_spin_unlock(&d->mutex);
@@ -206,12 +207,10 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 {
 	osprd_info_t *d = file2osprd(filp);	// device info
 	int r = 0;			// return value: initially 0
+	unsigned ticket; int i;
 
 	// is file open for writing?
 	int filp_writable = (filp->f_mode & FMODE_WRITE) != 0;
-
-	// This line avoids compiler warnings; you may remove it.
-	(void) filp_writable, (void) d;
 
 	// Set 'r' to the ioctl's return value: 0 on success, negative on error
 
@@ -252,20 +251,20 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// (Some of these operations are in a critical section and must
 		// be protected by a spinlock; which ones?)
 
-		// grab ticket
-		osp_spin_lock(&d->mutex);
-		unsigned ticket = d->ticket_head;
-		d->ticket_head++;
-		osp_spin_unlock(&d->mutex);
-
+		// (simple deadlock)
 		// check if process attempting to read/write to a device it holds
 		if (d->write_proc == current->pid)
 			return -EDEADLK;
-		int i;
 		for (i = 0; i < OSPRD_MAJOR; i++) {
 				if (d->read_procs[i] == current->pid)
 					return -EDEADLK;
 		}
+
+		// grab ticket
+		osp_spin_lock(&d->mutex);
+		ticket = d->ticket_head;
+		d->ticket_head++;
+		osp_spin_unlock(&d->mutex);
 
 		if (filp_writable) {
 			// wait for read/write locks
@@ -309,7 +308,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			osp_spin_lock(&d->mutex);
 			d->num_read_locks++;
 			// add current process to read lock holders
-			int i;
 			for (i = 0; i < OSPRD_MAJOR; i++) {
 				if (d->read_procs[i] == -1) {
 					d->read_procs[i] = current->pid;
@@ -352,7 +350,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			osp_spin_lock(&d->mutex);
 			d->num_read_locks++;
 			// add current process to read lock holders
-			int i;
 			for (i = 0; i < OSPRD_MAJOR; i++) {
 				if (d->read_procs[i] == -1) {
 					d->read_procs[i] = current->pid;
@@ -386,7 +383,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		}
 		else {
 			d->num_read_locks--;
-			int i;
 			for (i = 0; i < OSPRD_MAJOR; i++) {
 				if (d->read_procs[i] == current->pid) {
 					d->read_procs[i] = -1;

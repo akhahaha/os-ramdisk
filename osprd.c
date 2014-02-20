@@ -34,7 +34,7 @@
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("CS 111 RAM Disk");
 // EXERCISE: Pass your names into the kernel as the module's authors.
-MODULE_AUTHOR("Skeletor");
+MODULE_AUTHOR("Alan Kha and Braden Anderson");
 
 #define OSPRD_MAJOR	222
 
@@ -122,9 +122,9 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 	// Consider the 'req->sector', 'req->current_nr_sectors', and
 	// 'req->buffer' members, and the rq_data_dir() function.
 
-	// Your code here.
 	void *data_offset = d->data + (SECTOR_SIZE * req->sector);
 	unsigned int data_length = req->current_nr_sectors * SECTOR_SIZE;
+
 	// TODO: include a test for out-of-range read/writes
 	if (rq_data_dir(req) == WRITE) {
 		memcpy(data_offset, req->buffer, data_length);
@@ -133,7 +133,7 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 		memcpy(req->buffer, data_offset, data_length);
 	}
 	else {
-		// error condition
+		// TODO: error condition
 	}
 
 	end_request(req, 1);
@@ -166,21 +166,16 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 
 		osp_spin_lock(&d->mutex);
 		int filp_locked = ((filp->f_flags & F_OSPRD_LOCKED) != 0);
-		if(filp_locked) {
-			if(filp_writable) {
+		if (filp_locked) {
+			if (filp_writable)
 				d->write_locked = 0;
-				eprintk("Write-lock released.\n"); // DIAGNOSTIC
-			}
-			else {
+			else
 				d->num_read_locks--;
-				eprintk("Read-lock released.\n"); // DIAGNOSTIC
-			}
 
 			wake_up_all(&d->blockq);
 		}
 
 		osp_spin_unlock(&d->mutex);
-
 	}
 
 	return 0;
@@ -247,47 +242,32 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// (Some of these operations are in a critical section and must
 		// be protected by a spinlock; which ones?)
 
-		// TODO: is d ever null?
 		osp_spin_lock(&d->mutex);
 		ticket = d->ticket_head;
 		d->ticket_head++;
 
-		if (filp_writable) {
-			eprintk("Write-locking %d with tail %d.\n", ticket, d->ticket_tail); // DIAGNOSTIC
-			// write-lock the ramdisk
+		if (filp_writable) { // acquire write lock
 
-			// TODO: make sure current does not have a read lock.
-			// if it does, return -DEADLK.
-			if(d->write_locked == 1) {
-				eprintk("Looks like file is write-locked.\n"); // DIAGNOSTIC
-			}
-			if(d->num_read_locks != 0) {
-				eprintk("Looks like file is read-locked.\n"); // DIAGNOSTIC
-			}
-
-			// wait for everything else in queue to finish
+			// wait until all read/write locks released and for order
 			while (d->num_read_locks != 0 || d->write_locked == 1 || ticket != d->ticket_tail) {
-				// If the lock request blocks and is awoken by a signal, then
-				// return -ERESTARTSYS.
 				osp_spin_unlock(&d->mutex);
+
+				// TODO: check for deadlock
+
 				int w = wait_event_interruptible(d->blockq, 1);
 				if(w == -ERESTARTSYS) {
 					return -ERESTARTSYS;
 				}
 				schedule();
+
 				osp_spin_lock(&d->mutex);
 			}
 
-			filp->f_flags |= F_OSPRD_LOCKED;
+			// write lock acquired
 			d->write_locked = 1;
 		}
-		else {
-			eprintk("Read-locking %d with tail %d.\n", ticket, d->ticket_tail); // DIAGNOSTIC
-			// read-lock the ramdisk
-			if(d->write_locked == 1) {
-				eprintk("Looks like the file is write-locked.\n"); // DIAGNOSTIC
-			}
-
+		else { // acquire read lock
+			// wait for all write locks to finish and order
 			while (d->write_locked == 1 || ticket != d->ticket_tail) {
 				osp_spin_unlock(&d->mutex);
 				wait_event_interruptible(d->blockq, 1);
@@ -295,13 +275,14 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 				osp_spin_lock(&d->mutex);
 			}
 
-			filp->f_flags |= F_OSPRD_LOCKED;
+			// read-lock acquired
 			d->num_read_locks++;
 		}
 
+		// lock acquired
 		d->ticket_tail++;
+		filp->f_flags |= F_OSPRD_LOCKED;
 		osp_spin_unlock(&d->mutex);
-		eprintk("Locked %d with tail %d.\n", ticket, d->ticket_tail); // DIAGNOSTIC
 
 	} else if (cmd == OSPRDIOCTRYACQUIRE) {
 		// EXERCISE: ATTEMPT to lock the ramdisk.
@@ -314,39 +295,44 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		osp_spin_lock(&d->mutex);
 		unsigned ticket = d->ticket_head;
 
-		if (filp_writable) {	// write lock
-			if(d->num_read_locks > 0 || d->write_locked == 1 || ticket != d->ticket_tail) {
+		if (filp_writable) { // try acquire write lock
+			// check if any write or read locks
+			if (d->num_read_locks > 0 || d->write_locked == 1) {
 				osp_spin_unlock(&d->mutex);
 				return -EBUSY;
 			}
 			filp->f_flags |= F_OSPRD_LOCKED;
 			d->write_locked = 1;
 		}
-		else { 					// read lock
-			if(d->write_locked == 1) {
+		else { // try acquire read lock
+			// check if any write locks
+			if (d->write_locked == 1) {
 				osp_spin_unlock(&d->mutex);
 				return -EBUSY;
 			}
 			filp->f_flags |= F_OSPRD_LOCKED;
 			d->num_read_locks++;
 		}
+
+		// lock acquired
 		d->ticket_head++;
 		d->ticket_tail++;
 		osp_spin_unlock(&d->mutex);
-		eprintk("TryAcquired %d with tail %d.\n", ticket, d->ticket_tail); // DIAGNOSTIC
 
 	} else if (cmd == OSPRDIOCRELEASE) {
 		// EXERCISE: Unlock the ramdisk.
 		//
 		// If the file hasn't locked the ramdisk, return -EINVAL.
-		if((filp->f_flags & F_OSPRD_LOCKED) == 0) {
-			return -EINVAL;
-		}
-		osp_spin_lock(&d->mutex);
 		// Otherwise, clear the lock from filp->f_flags, wake up
 		// the wait queue, perform any additional accounting steps
 		// you need, and return 0.
-		if(filp_writable) {
+
+		if ((filp->f_flags & F_OSPRD_LOCKED) == 0) {
+			return -EINVAL;
+		}
+		osp_spin_lock(&d->mutex);
+
+		if (filp_writable) {
 			d->write_locked = 0;
 			wake_up_all(&d->blockq);
 		}
@@ -358,10 +344,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		filp->f_flags ^= F_OSPRD_LOCKED;
 		osp_spin_unlock(&d->mutex);
 
-		eprintk("Lock released.\n"); // DIAGNOSTIC
-
 	} else
-		r = -ENOTTY; /* unknown command */
+		r = -ENOTTY; // unknown command
 	return r;
 }
 
@@ -380,8 +364,7 @@ static void osprd_setup(osprd_info_t *d)
 
 
 /*****************************************************************************/
-/*	THERE IS NO NEED TO UNDERSTAND ANY CODE BELOW THIS LINE!			 */
-/*																			 */
+/*	THERE IS NO NEED TO UNDERSTAND ANY CODE BELOW THIS LINE!				 */
 /*****************************************************************************/
 
 // Process a list of requests for a osprd_info_t.

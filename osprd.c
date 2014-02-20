@@ -169,11 +169,11 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 		if(filp_locked) {
 			if(filp_writable) {
 				d->write_locked = 0;
-				eprintk("Write-lock released.\n");
+				eprintk("Write-lock released.\n"); // DIAGNOSTIC
 			}
 			else {
 				d->num_read_locks--;
-				eprintk("Read-lock released\n");
+				eprintk("Read-lock released.\n"); // DIAGNOSTIC
 			}
 
 			wake_up_all(&d->blockq);
@@ -304,7 +304,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		eprintk("Locked %d with tail %d.\n", ticket, d->ticket_tail); // DIAGNOSTIC
 
 	} else if (cmd == OSPRDIOCTRYACQUIRE) {
-
 		// EXERCISE: ATTEMPT to lock the ramdisk.
 		//
 		// This is just like OSPRDIOCACQUIRE, except it should never
@@ -313,22 +312,17 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// Otherwise, if we can grant the lock request, return 0.
 
 		osp_spin_lock(&d->mutex);
-
-		/* grab a ticket */
 		unsigned ticket = d->ticket_head;
-		d->ticket_head++;
 
-		if (filp_writable) {
-			// write lock
-			if(d->num_read_locks != 0 || d->write_locked == 1 || ticket != d->ticket_tail) {
+		if (filp_writable) {	// write lock
+			if(d->num_read_locks > 0 || d->write_locked == 1 || ticket != d->ticket_tail) {
 				osp_spin_unlock(&d->mutex);
 				return -EBUSY;
 			}
 			filp->f_flags |= F_OSPRD_LOCKED;
 			d->write_locked = 1;
 		}
-		else {
-			// read lock
+		else { 					// read lock
 			if(d->write_locked == 1) {
 				osp_spin_unlock(&d->mutex);
 				return -EBUSY;
@@ -336,7 +330,10 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			filp->f_flags |= F_OSPRD_LOCKED;
 			d->num_read_locks++;
 		}
+		d->ticket_head++;
+		d->ticket_tail++;
 		osp_spin_unlock(&d->mutex);
+		eprintk("TryAcquired %d with tail %d.\n", ticket, d->ticket_tail); // DIAGNOSTIC
 
 	} else if (cmd == OSPRDIOCRELEASE) {
 		// EXERCISE: Unlock the ramdisk.
